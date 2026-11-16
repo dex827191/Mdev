@@ -3,7 +3,8 @@ name: Build SSH Protocol APK
 on:
   push:
     paths:
-      - "**.zip"
+      - "*.zip"
+      - "**/*.zip"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -14,28 +15,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract uploaded ZIP
+      - name: Extract project ZIP
         shell: bash
         run: |
           shopt -s nullglob
-          archives=( *.zip )
+          archives=( "$GITHUB_WORKSPACE"/*.zip )
           if (( ${#archives[@]} == 0 )); then
-            echo "Tidak ditemukan file ZIP di root repository."
+            echo "Tidak ada file ZIP di root repository."
             exit 1
           fi
 
           for archive in "${archives[@]}"; do
-            echo "Extracting: $archive"
+            echo "Extracting: $(basename "$archive")"
             unzip -oq "$archive" -d "$GITHUB_WORKSPACE"
           done
 
           if [[ ! -f "$GITHUB_WORKSPACE/gradlew" ]]; then
-            echo "gradlew tidak ditemukan di root setelah ekstraksi."
-            echo "Pastikan isi ZIP berisi gradlew, settings.gradle.kts, dan folder app/ di root ZIP."
+            echo "gradlew tidak ditemukan setelah ekstraksi."
+            echo "Pastikan gradlew, settings.gradle.kts, build.gradle.kts, dan app/ berada di root ZIP."
             exit 1
           fi
 
@@ -44,33 +49,44 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      # GitHub ubuntu-latest already includes Android command-line tools.
+      # Do not use setup-android here: its default setup may request the
+      # obsolete SDK package named 'tools', which sdkmanager no longer provides.
+      - name: Install Android SDK components
+        shell: bash
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "sdkmanager tidak ditemukan di $ANDROID_HOME"
+            exit 1
+          fi
 
-      - name: Prepare Gradle for GitHub runner
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      - name: Prepare project for GitHub runner
         shell: bash
         run: |
           chmod +x ./gradlew
 
-          # Project ZIP dibuat di Termux; jangan gunakan SDK path lokal Termux.
+          # Remove Termux-specific SDK path from the uploaded project.
           rm -f local.properties
-
-          # AGP 8.13.0 berjalan dengan Gradle 8.13.
-          sed -i 's/gradle-9\.0\.0-bin\.zip/gradle-8.13-bin.zip/' gradle/wrapper/gradle-wrapper.properties
-
-          # Hapus override aapt2 yang menunjuk ke instalasi Termux.
           sed -i '/^android\.aapt2FromMavenOverride=/d' gradle.properties
+
+          # Android Gradle Plugin 8.13.0 requires Gradle 8.13.
+          sed -i 's#gradle-9\.0\.0-bin\.zip#gradle-8.13-bin.zip#' gradle/wrapper/gradle-wrapper.properties
 
       - name: Build debug APK
         run: ./gradlew --no-daemon clean assembleDebug
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: SSH-Protocol-debug-apk
